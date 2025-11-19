@@ -1,0 +1,177 @@
+Metadata-Version: 2.4
+Name: horillasetup
+Version: 1.0.0
+Summary: CLI tool to build and manage Horilla projects
+Home-page: https://github.com/horilla-opensource/setup
+Author: Horilla
+Author-email: support@horilla.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-python
+Dynamic: summary
+
+# 🛠️ Horilla Setup CLI (`horillasetup`)
+
+The **Horilla Setup CLI** is a lightweight, cross-platform command-line utility designed to streamline the **initialization**, **migration**, and **dependency setup** processes for the **Horilla ecosystem** — including **HRMS v1**, **HRMS v2**, **CRM**, and upcoming modules.
+
+It automates repetitive setup tasks like environment preparation, dependency installation, and migration management, ensuring a smooth and consistent workflow for both **developers** and **deployment engineers**.
+
+---
+
+## 🚀 Key Features
+
+✅ **Quick Environment Setup** — Instantly configure a new Horilla environment with one command.
+✅ **Version-Aware Migration** — Supports both **HRMS v1** and **HRMS v2** with smart compatibility handling.
+✅ **Dependency Automation** — Automatically installs required Python packages from `requirements.txt`.
+✅ **Seamless Upgrades** — Migrate safely from **v1** to **v2** while preserving data integrity.
+✅ **Cross-Platform Support** — Works smoothly on **Windows**, **Linux**, and **macOS**.
+
+---
+
+## ⚙️ Installation
+
+You can install `horillasetup` globally or locally for active development.
+
+### 📦 Global Installation
+
+```bash
+pip install horillasetup
+```
+
+### 🧩 Local (Development) Installation
+
+If you’re working on improving or customizing the CLI:
+
+```bash
+git clone https://github.com/horilla-opensource/setup.git
+cd horilla-ctl
+pip install -e .
+```
+
+> 💡 The `-e` flag installs the CLI in *editable mode*, so any code changes take effect immediately.
+
+---
+
+## 🧭 Usage Overview
+
+The CLI provides unified commands to **build**, **migrate**, and **manage dependencies** across all Horilla-based applications.
+
+View all available commands:
+
+```bash
+horillasetup --help
+```
+
+---
+
+### 🏗️ 1. Build a New Horilla HRMS Project
+
+Create and initialize a new Horilla HRMS instance:
+
+```bash
+horillasetup build hrms-v1
+```
+
+or
+
+```bash
+horillasetup build hrms-v2
+```
+
+**This command will:**
+
+* Clone the specified Horilla HRMS repository.
+* Install all dependencies from `requirements.txt`.
+* Set up required environment files (`.env`).
+* Display post-installation guidance.
+
+---
+
+### 🧱 2. Apply Migrations
+
+Run database migrations for your Horilla instance:
+
+```bash
+horillasetup migrate hrms-v1
+```
+
+or
+
+```bash
+horillasetup migrate hrms-v2
+```
+
+**This performs:**
+
+* `makemigrations` and `migrate` automatically.
+* Static file collection (`collectstatic --noinput`).
+* Database schema setup or update.
+
+---
+
+### 🔄 3. Upgrade from HRMS v1 → HRMS v2
+
+For upgrading an existing v1 database to v2:
+
+```bash
+horillasetup migrate hrms-v2 --existing
+```
+
+**What happens:**
+
+* Detects the existing HRMS v1 database.
+* Clears outdated migration entries safely.
+* Applies v2 migrations using compatibility logic.
+* Fakes migration states where required to preserve data.
+
+---
+
+### 📦 4. Install Dependencies Only
+
+Install all required dependencies without building or migrating:
+
+```bash
+horillasetup install-deps
+```
+
+**Performs:**
+
+* Validation for the `requirements.txt` file.
+* Executes `pip install -r requirements.txt`.
+* Displays installation progress and status summary.
+
+---
+
+## 💡 Example Workflow
+
+```bash
+# Step 1: Build a fresh HRMS v2 environment
+horillasetup build hrms-v2
+
+# Step 2: Apply migrations for initial setup
+horillasetup migrate hrms-v2
+
+# (Optional) Upgrade an existing v1 database
+horillasetup migrate hrms-v2 --existing
+
+# (Optional) Reinstall dependencies manually
+horillasetup install-deps
+```
+
+---
+
+## 🧭 Future Roadmap
+
+* 🔌 Support for **CRM** and other upcoming Horilla modules
+* 🧱 Modular plugin-based scaffolding system
+* ⚙️ Smart environment detection and guided setup wizard
+* 🔄 Automated upgrade checks and dependency validation

@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+setup.py
+horillasetup/__init__.py
+horillasetup/ctl.py
+horillasetup.egg-info/PKG-INFO
+horillasetup.egg-info/SOURCES.txt
+horillasetup.egg-info/dependency_links.txt
+horillasetup.egg-info/entry_points.txt
+horillasetup.egg-info/top_level.txt
