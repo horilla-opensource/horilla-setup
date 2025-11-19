@@ -15,7 +15,7 @@ setup(
     description="CLI tool to build and manage Horilla projects",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/horilla-opensource/setup",
+    url="https://github.com/horilla-opensource/horilla-setup",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",

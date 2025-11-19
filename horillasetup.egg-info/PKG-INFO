@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: horillasetup
 Version: 1.0.0
 Summary: CLI tool to build and manage Horilla projects
-Home-page: https://github.com/horilla-opensource/setup
+Home-page: https://github.com/horilla-opensource/horilla-setup
 Author: Horilla
 Author-email: support@horilla.com
 Classifier: Programming Language :: Python :: 3
