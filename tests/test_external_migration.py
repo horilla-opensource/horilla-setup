@@ -240,6 +240,19 @@ def test_a_v1_password_still_authenticates(upgraded):
     assert "HR Managers" in out.stdout
 
 
+def test_user_flags_and_null_timestamps_survive(upgraded):
+    """Flags decide who can log in and who is an administrator, and a NULL
+    last_login must not become a timestamp -- a rewritten row would show up
+    here rather than in the hash comparison, which only covers passwords."""
+    db, _ = upgraded
+    assert psql(db, "select count(*) from horilla_auth_horillauser "
+                    "where is_superuser") == "1"
+    assert psql(db, "select count(*) from horilla_auth_horillauser "
+                    "where not is_active") == "1"
+    assert psql(db, "select count(*) from horilla_auth_horillauser "
+                    "where last_login is null") == "11"
+
+
 def test_v2_only_tables_are_physically_created(upgraded):
     """Guards against a ledger that claims v2 over a v1 schema."""
     db, _ = upgraded
