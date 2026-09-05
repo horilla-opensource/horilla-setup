@@ -263,6 +263,31 @@ ordering that the holiday data copy depends on, which would break silently.
 
 ---
 
+## 📤 Releasing
+
+Publishing is driven by a git tag, and the tag must match `setup.py`:
+
+```bash
+# 1. bump the version in setup.py and add a CHANGELOG entry
+# 2. commit, then tag with a leading v
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+The workflow refuses to publish if the tag and `setup.py` disagree, or if that
+version already exists on PyPI. `workflow_dispatch` builds and verifies the same
+way without publishing, so the path can be rehearsed.
+
+This is deliberate. Versions 1.0.2 – 1.0.4 were published from a working copy
+while `setup.py` in git still said `1.0.1`, so for seven months you could not
+tell what was in a release by reading the repository. The tag check makes the
+two structurally unable to drift again.
+
+Publishing uses [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
+where configured — no long-lived token in repository secrets — and falls back to
+a `PYPI_API_TOKEN` secret otherwise.
+
+---
+
 ## 🛣️ Future Roadmap
 
 * 🔌 Plugin-based scaffolding for new Horilla modules
