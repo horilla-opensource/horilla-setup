@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 build/
 *.egg-info/
+horillasetup.egg-info/
