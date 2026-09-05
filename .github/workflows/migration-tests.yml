@@ -1,0 +1,189 @@
+# The v1 -> v2 migration is tested against real Postgres and real v1 databases
+# built from real Horilla release tags. Nothing here is mocked: the thing under
+# test is a schema migration, so an ORM-level fixture would abstract away
+# exactly what can break.
+#
+# Two jobs, because they cost very different amounts:
+#
+#   fixtures  builds the five v1 databases and caches the dumps. Slow (~15 min,
+#             a full pip install per tag) but only runs when the cache misses.
+#   tests     restores those dumps and runs the suite against a real v2 checkout.
+#
+# The dumps are 1.6 MB each while the checkouts that produce them are ~600 MB,
+# so caching the dumps rather than the sources is what makes this affordable.
+name: migration tests
+
+on:
+  push:
+    branches: [master, "feat/**", "fix/**"]
+  pull_request:
+    branches: [master]
+  # v2's dev/v2.0 moves independently of this repo, so a green run today says
+  # nothing about tomorrow. The weekly run is what catches upstream drift --
+  # particularly a reordering of base/0012 and leave/0005, which would break
+  # the holiday copy silently.
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+env:
+  # Every tag in the supported range. Two physical schema variants exist across
+  # them (pre-1.5 and 1.5-plus), but all five are built so a version-specific
+  # regression cannot hide.
+  V1_TAGS: "1.3.2 1.4.0 1.5.0 1.6.0 1.6.1"
+  HORILLA_V1_WORKDIR: /tmp/horilla-v1-fixtures
+
+jobs:
+  fixtures:
+    name: build v1 fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      cache-key: ${{ steps.key.outputs.value }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: horilla
+          POSTGRES_PASSWORD: horilla
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: key
+        # Keyed on the builder, its seed scripts, AND this workflow -- because
+        # what gets built depends on how the builder is invoked, not only on the
+        # builder itself. Hashing tests/fixtures/* alone was wrong: switching
+        # from one variant per tag to two left the key unchanged, so the job
+        # restored the old single-variant cache in 25s and the change had no
+        # effect at all.
+        run: |
+          echo "value=v1-fixtures-${{ runner.os }}-${{ hashFiles('tests/fixtures/*', '.github/workflows/migration-tests.yml') }}" >> "$GITHUB_OUTPUT"
+
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/horilla-v1-fixtures/*.dump
+          key: ${{ steps.key.outputs.value }}
+
+      - uses: actions/setup-python@v5
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install Postgres client
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Build fixtures
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: horilla
+          PGPASSWORD: horilla
+        run: |
+          chmod +x tests/fixtures/build_v1.sh
+          for tag in $V1_TAGS; do
+            echo "::group::v1 $tag"
+            # Both variants. The plain dump is what the schema-level tests
+            # restore; the HR-seeded one (companies, employees, payroll, leave)
+            # is what the data-migration tests need. Building only the seeded
+            # one leaves the others skipping silently, which is how a first CI
+            # run reported green-ish while a third of the suite never ran.
+            # The venv and clone are reused between the two, so the second
+            # pass costs seconds rather than minutes.
+            tests/fixtures/build_v1.sh "$tag"
+            HORILLA_SEED_HR_DATA=1 tests/fixtures/build_v1.sh "$tag"
+            echo "::endgroup::"
+          done
+          ls -la /tmp/horilla-v1-fixtures/*.dump
+
+  tests:
+    name: migration suite
+    runs-on: ubuntu-latest
+    needs: fixtures
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: horilla
+          POSTGRES_PASSWORD: horilla
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: horilla
+      PGPASSWORD: horilla
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/horilla-v1-fixtures/*.dump
+          key: ${{ needs.fixtures.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Check out Horilla v2
+        uses: actions/checkout@v4
+        with:
+          repository: horilla/horilla-hr
+          ref: dev/v2.0
+          path: hr-v2
+
+      - name: Install v2
+        working-directory: hr-v2
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q --upgrade pip
+          .venv/bin/pip install -q -r requirements.txt
+          # DEBUG=False deliberately -- it is what customers run, and Django
+          # changes defaults between the two. That turns on v2's production
+          # security check, which requires a non-placeholder SECRET_KEY, real
+          # ALLOWED_HOSTS and a non-default DB_INIT_PASSWORD; omitting any of
+          # them fails at import with ImproperlyConfigured.
+          cat > .env <<EOF
+          DEBUG=False
+          SECRET_KEY=ci-only-not-a-real-secret-0123456789abcdefghijklmnop
+          DB_INIT_PASSWORD=ci-only-db-init-0123456789abcdef
+          DATABASE_URL=postgres://horilla:horilla@localhost:5432/postgres
+          ALLOWED_HOSTS=localhost,127.0.0.1
+          EOF
+
+      - name: Install the tool
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q --upgrade pip
+          .venv/bin/pip install -q pytest psycopg2-binary
+          # Editable, because tests/test_entrypoint.py runs the real console
+          # script rather than importing the module.
+          .venv/bin/pip install -q -e .
+
+      - name: Run the suite
+        env:
+          HORILLA_V2_ROOT: ${{ github.workspace }}/hr-v2
+          HORILLA_V2_PYTHON: ${{ github.workspace }}/hr-v2/.venv/bin/python
+        # -p no:randomly: several modules share a module-scoped migrated
+        # database because a full run takes ~3 minutes; reordering within a
+        # module would rebuild it per test.
+        run: .venv/bin/python -m pytest tests -q -p no:randomly --durations=10

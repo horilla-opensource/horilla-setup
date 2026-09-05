@@ -10,6 +10,8 @@ from pathlib import Path
 import shutil
 import argparse
 
+from horillasetup import migrate_v1
+
 # -------------------------------------------------------------------------
 # Horilla repositories configuration
 # -------------------------------------------------------------------------
@@ -57,8 +59,9 @@ def install_packages():
 # -------------------------------------------------------------------------
 # MIGRATIONS
 # -------------------------------------------------------------------------
-def apply_migrations_hrms(existing=False):
-    """Apply Django migrations for HRMS v2 (with optional v1 migration mode)."""
+def apply_migrations_hrms(existing=False, from_v1=False, backup_dir=None,
+                          skip_backup=False, assume_yes=False):
+    """Apply Django migrations for HRMS v2, or migrate an existing v1 database."""
     current_dir = Path.cwd()
     manage_py = current_dir / "manage.py"
 
@@ -66,40 +69,38 @@ def apply_migrations_hrms(existing=False):
         print("⚠️  manage.py not found. Make sure you are in a Horilla project directory.\n")
         sys.exit(1)
 
-    print("🔍 Checking Horilla HRMS database setup...\n")
-
     if existing:
-        print("🗃️  Existing Horilla v1 database detected. Running migration sync steps...\n")
-        clear_migrations_script = """
-from django.db.migrations.recorder import MigrationRecorder
-count = MigrationRecorder.Migration.objects.count()
-MigrationRecorder.Migration.objects.all().delete()
-print(f'[SUCCESS] Cleared {count} old migration records.')
-"""
-        subprocess.run(
-            [sys.executable, "manage.py", "shell"],
-            input=clear_migrations_script,
-            text=True,
-            check=True,
+        # This flow deleted every row in django_migrations and then faked the
+        # whole graph, which left the ledger claiming v2 while the schema was
+        # still v1 -- new tables were never created, and there was no backup.
+        # It cannot be made safe, so it is refused rather than quietly mapped
+        # onto the new path: anyone with it in a script must see why.
+        print(
+            "\n❌ --existing has been removed. It deleted the migration ledger\n"
+            "   and faked every migration, which left the database claiming to\n"
+            "   be v2 while the schema was still v1.\n\n"
+            "   Use this instead:\n\n"
+            "       horillasetup migrate hrms-v2 --from-v1\n\n"
+            f"   It migrates a v1 database ({migrate_v1.SUPPORTED_RANGE}) in place,\n"
+            "   taking a backup first and verifying the data afterwards.\n"
         )
+        sys.exit(2)
 
-        commands = [
-            f"{PYTHON_CMD} manage.py makemigrations horilla_auth",
-            f"{PYTHON_CMD} manage.py migrate contenttypes --fake",
-            f"{PYTHON_CMD} manage.py migrate auth --fake",
-            f"{PYTHON_CMD} manage.py migrate horilla_auth",
-            f"{PYTHON_CMD} manage.py makemigrations",
-            f"{PYTHON_CMD} manage.py migrate --fake",
-            f"{PYTHON_CMD} manage.py migrateusers",
-            f"{PYTHON_CMD} manage.py collectstatic --noinput",
-        ]
-    else:
-        print("🆕 Running standard migrations...\n")
-        commands = [
-            f"{PYTHON_CMD} manage.py makemigrations",
-            f"{PYTHON_CMD} manage.py migrate",
-            f"{PYTHON_CMD} manage.py collectstatic --noinput",
-        ]
+    if from_v1:
+        sys.exit(migrate_v1.run(
+            current_dir,
+            backup_dir=Path(backup_dir) if backup_dir else None,
+            skip_backup=skip_backup,
+            assume_yes=assume_yes,
+        ))
+
+    print("🔍 Checking Horilla HRMS database setup...\n")
+    print("🆕 Running standard migrations...\n")
+    commands = [
+        f"{PYTHON_CMD} manage.py makemigrations",
+        f"{PYTHON_CMD} manage.py migrate",
+        f"{PYTHON_CMD} manage.py collectstatic --noinput",
+    ]
 
     for cmd in commands:
         print(f"▶️  {cmd}")
@@ -272,7 +273,26 @@ def main():
     migrate_subparsers = migrate_parser.add_subparsers(dest="subcommand", required=True)
     migrate_subparsers.add_parser("hrms-v1", help="Run HRMS v1 migrations")
     migrate_hrms_parser = migrate_subparsers.add_parser("hrms-v2", help="Run HRMS v2 migration flow")
-    migrate_hrms_parser.add_argument("--existing", action="store_true", help="Migrate from existing v1 database")
+    migrate_hrms_parser.add_argument(
+        "--existing", action="store_true",
+        help=argparse.SUPPRESS,  # removed; kept so it errors rather than "unrecognized"
+    )
+    migrate_hrms_parser.add_argument(
+        "--from-v1", action="store_true",
+        help=f"Migrate an existing Horilla v1 database ({migrate_v1.SUPPORTED_RANGE}) in place",
+    )
+    migrate_hrms_parser.add_argument(
+        "--backup-dir", metavar="PATH",
+        help="Where to write the pre-migration backup (default: ./horilla-migration-backups)",
+    )
+    migrate_hrms_parser.add_argument(
+        "--skip-backup", action="store_true",
+        help="Do not back up first. The migration then cannot be undone",
+    )
+    migrate_hrms_parser.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Do not prompt for confirmation",
+    )
     migrate_subparsers.add_parser("crm", help="Run CRM migrations")
 
     # -----------------------------
@@ -300,7 +320,13 @@ def main():
 
     elif args.command == "migrate":
         if args.subcommand == "hrms-v2":
-            apply_migrations_hrms(existing=args.existing)
+            apply_migrations_hrms(
+                existing=args.existing,
+                from_v1=args.from_v1,
+                backup_dir=args.backup_dir,
+                skip_backup=args.skip_backup,
+                assume_yes=args.yes,
+            )
         elif args.subcommand == "hrms-v1":
             apply_migrations_hrms_v1()
         elif args.subcommand == "crm":
