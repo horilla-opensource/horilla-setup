@@ -18,10 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from conftest import SCHEMA_VARIANTS, dump_path  # noqa: E402
 
-fingerprint_mod = pytest.importorskip(
-    "horillasetup.migration.fingerprint",
-    reason="Phase 1 has not landed horillasetup/migration/ yet",
-)
 from horillasetup.migration.fingerprint import (  # noqa: E402
     VARIANT_15_PLUS,
     VARIANT_ALREADY_V2,
@@ -104,10 +100,11 @@ def test_partial_schema_is_refused(scratch_db):
 def test_already_migrated_database_is_refused(scratch_db):
     """Re-running the migration must not be possible.
 
-    Detected by v2-only tables, NOT by horilla_auth_horillauser: HorillaUser
-    sets db_table = "auth_user" and adopts v1's table, so that name is never
-    created. Using it as the marker silently failed to spot an already-migrated
-    database, which then had its ledger unapplied and every migration re-run.
+    Detected by v2-only tables from LATER migrations, not by
+    horilla_auth_horillauser. Under the rename approach that table is the very
+    first thing produced, so a run that died immediately after would look fully
+    migrated and be refused -- leaving the operator with a database no tool
+    will touch.
     """
     restore_v1(scratch_db)
     with connect(scratch_db) as conn:
@@ -120,9 +117,10 @@ def test_already_migrated_database_is_refused(scratch_db):
 
 
 def test_v2_user_table_name_is_not_the_marker(scratch_db):
-    """Guards the regression directly: a stray horilla_auth_horillauser must
-    not be what identifies a migrated database, because the adoption design
-    never creates it."""
+    """Guards the regression directly: horilla_auth_horillauser must not be
+    what identifies a migrated database. The rename creates it first, before
+    any other app has migrated, so treating it as proof of completion would
+    refuse a database that has barely started and still needs the tool."""
     restore_v1(scratch_db)
     with connect(scratch_db) as conn:
         with conn.cursor() as cur:
