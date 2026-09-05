@@ -44,18 +44,24 @@ def dump_path(tag, variant=""):
     return os.path.join(WORKDIR, f"v1_{tag}{variant}.dump")
 
 
-def find_dump(tag):
-    """A fixture for `tag`, preferring the plain one, or None.
+def find_dump(tag, exact=False):
+    """A fixture for `tag`, or None.
 
-    Exists because a test cannot assume which variants were built. CI builds
-    both; a developer may have built only one.
+    The two variants are NOT interchangeable, which is the whole reason this
+    takes a flag. The plain dump has 10 users and 5 null last_logins; the
+    HR-seeded one has 16 and 11, plus companies, employees and payroll. A test
+    characterising the plain fixture gets wrong answers from the seeded one
+    rather than a clean skip -- which is exactly what happened when this
+    silently fell back: ten failures asserting `16 == 10` against a CI cache
+    that happened to hold only _full dumps.
 
-    The PLAIN dump is preferred, not the HR-seeded superset. Treating _full as
-    a drop-in was tried and broke test_v1_fixtures, which characterises the
-    plain fixture exactly -- 10 users, 5 with a null last_login. The seeded one
-    has 16 and 11. A test that needs HR data asks for dump_path(tag, "_full")
-    explicitly rather than hoping this returns it.
+    exact=True returns only the plain dump, so a test that depends on its
+    contents skips instead of measuring the wrong database. The default is
+    lenient, for tests that only need *a* v1 schema and do not care which.
     """
+    if exact:
+        plain = dump_path(tag)
+        return plain if os.path.exists(plain) else None
     for variant in ("", "_full"):
         candidate = dump_path(tag, variant)
         if os.path.exists(candidate):
@@ -160,8 +166,10 @@ def v1_tag(request):
     Parameterised rather than looped so a failure names the tag it failed on.
     """
     tag = request.param
-    if find_dump(tag) is None:
-        pytest.skip(f"no fixture for {tag}; run fixtures/build_v1.sh {tag}")
+    # exact: test_v1_fixtures asserts this fixture's exact row counts, so the
+    # HR-seeded superset is not a substitute.
+    if find_dump(tag, exact=True) is None:
+        pytest.skip(f"no plain fixture for {tag}; run fixtures/build_v1.sh {tag}")
     return tag
 
 
@@ -176,6 +184,6 @@ def v1_db(v1_tag):
     db = f"mig_test_{v1_tag.replace('.', '_')}"
     subprocess.run(["dropdb", "--if-exists", db], check=True)
     subprocess.run(["createdb", db], check=True)
-    restore_dump(db, find_dump(v1_tag))
+    restore_dump(db, find_dump(v1_tag, exact=True))
     yield db
     subprocess.run(["dropdb", "--if-exists", db], check=True)

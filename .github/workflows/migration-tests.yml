@@ -55,9 +55,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - id: key
-        # Keyed on the builder and its seed scripts: a change to either produces
-        # different fixtures, and reusing the old ones would test the wrong thing.
-        run: echo "value=v1-fixtures-${{ runner.os }}-${{ hashFiles('tests/fixtures/*') }}" >> "$GITHUB_OUTPUT"
+        # Keyed on the builder, its seed scripts, AND this workflow -- because
+        # what gets built depends on how the builder is invoked, not only on the
+        # builder itself. Hashing tests/fixtures/* alone was wrong: switching
+        # from one variant per tag to two left the key unchanged, so the job
+        # restored the old single-variant cache in 25s and the change had no
+        # effect at all.
+        run: |
+          echo "value=v1-fixtures-${{ runner.os }}-${{ hashFiles('tests/fixtures/*', '.github/workflows/migration-tests.yml') }}" >> "$GITHUB_OUTPUT"
 
       - id: cache
         uses: actions/cache@v4
