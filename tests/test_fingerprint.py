@@ -16,7 +16,11 @@ import pytest
 # The tool's own package, one level up from tests/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import SCHEMA_VARIANTS, dump_path  # noqa: E402
+from conftest import (  # noqa: E402
+    SCHEMA_VARIANTS,
+    find_dump,
+    restore_dump,
+)
 
 from horillasetup.migration.fingerprint import (  # noqa: E402
     VARIANT_15_PLUS,
@@ -55,10 +59,15 @@ def scratch_db(request):
 
 
 def restore_v1(db, tag="1.6.1"):
-    subprocess.run(
-        ["pg_restore", "-d", db, "--no-owner", "--no-privileges", dump_path(tag)],
-        capture_output=True, check=False,
-    )
+    """Restore whichever fixture variant exists for `tag`.
+
+    find_dump rather than a hardcoded name: CI seeds HR data, so it produces
+    only v1_<tag>_full.dump and the plain name is never written there.
+    """
+    path = find_dump(tag)
+    if path is None:
+        pytest.skip(f"no fixture for {tag}; run fixtures/build_v1.sh {tag}")
+    restore_dump(db, path)
 
 
 # --- acceptance -----------------------------------------------------------

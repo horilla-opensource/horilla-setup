@@ -24,14 +24,12 @@ from pathlib import Path
 
 import pytest
 
-from conftest import database_url, dump_path, psql
+from conftest import database_url, dump_path, psql, restore_dump
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 V2_ROOT = Path(os.environ.get("HORILLA_V2_ROOT", ""))
 CLI = TOOL_ROOT / ".venv/bin/horillasetup"
-HR_DUMP = os.environ.get(
-    "HORILLA_V1_HR_DUMP", dump_path("1.6.1").replace(".dump", "_full.dump")
-)
+HR_DUMP = os.environ.get("HORILLA_V1_HR_DUMP", dump_path("1.6.1", "_full"))
 
 pytestmark = pytest.mark.skipif(
     not (str(V2_ROOT) and (V2_ROOT / "manage.py").exists()
@@ -61,8 +59,7 @@ def migrated():
     db = "leave_copy"
     subprocess.run(["dropdb", "--if-exists", db], check=True)
     subprocess.run(["createdb", db], check=True)
-    subprocess.run(["pg_restore", "-d", db, "--no-owner", "--no-privileges",
-                    HR_DUMP], capture_output=True, check=False)
+    restore_dump(db, HR_DUMP)
 
     before = {
         "holidays": psql(db, "select count(*) from leave_holiday"),
@@ -79,46 +76,54 @@ def migrated():
     subprocess.run(["dropdb", "--if-exists", db], check=True)
 
 
-def test_the_copy_window_still_exists(migrated):
-    """The copy depends on leave/0005 running after base/0001 and before
-    base/0012. Django does not order base/0012 and leave/0005 relative to each
-    other, so this is a property of the plan, not a guarantee -- pinned here
-    because if it changes, the copy stops working silently."""
-    script = V2_ROOT / "_pytest_order.py"
-    script.write_text(
-        "import django; django.setup()\n"
-        "from django.db.migrations.loader import MigrationLoader\n"
-        "from django.db import connection\n"
-        "g = MigrationLoader(connection, ignore_no_migrations=True).graph\n"
-        "seen, order = set(), []\n"
-        "for leaf in g.leaf_nodes():\n"
-        "    for node in g.forwards_plan(leaf):\n"
-        "        if node not in seen:\n"
-        "            seen.add(node); order.append(node)\n"
-        "idx = {n: i for i, n in enumerate(order)}\n"
-        "for app, prefix in [('base','0001'), ('leave','0005'), ('base','0012')]:\n"
-        "    match = [k for k in idx if k[0] == app and k[1].startswith(prefix)]\n"
-        "    print('::POS', app, prefix, idx[match[0]] if match else -1)\n"
-    )
-    env = {**os.environ, "PYTHONPATH": str(TOOL_ROOT),
-           "DJANGO_SETTINGS_MODULE": "horillasetup.migration_settings"}
-    try:
-        out = _with_db(migrated["db"], lambda: subprocess.run(
-            [str(V2_ROOT / ".venv/bin/python"), script.name],
-            cwd=V2_ROOT, env=env, capture_output=True, text=True,
-        ))
-    finally:
-        script.unlink(missing_ok=True)
+def test_the_copy_anchor_still_has_both_tables():
+    """At the anchor the source must still exist and the destination must
+    already exist. That is the whole precondition for the copy.
 
-    positions = {f"{p[1]}/{p[2]}": int(p[3])
-                 for p in (l.split() for l in out.stdout.splitlines())
-                 if p and p[0] == "::POS"}
-    assert positions["base/0001"] < positions["leave/0005"], (
-        "base_holidays is no longer created before leave_holiday is destroyed"
-    )
-    assert positions["leave/0005"] < positions["base/0012"], (
-        "leave/0005 no longer runs before base/0012 -- the copy window moved"
-    )
+    Asserted against a real database migrated up to the anchor, not against the
+    migration graph. An earlier version of this test pinned graph positions --
+    base/0001 < leave/0005 < base/0012 -- because that is the order this machine
+    produced. CI produced leave/0005 at 52 and base/0012 at 46, the other way
+    round, and the migration was still correct: the copy runs before base/0012
+    either way, and base/0012 converts whatever rows it finds.
+
+    So the position ordering was never the invariant, only an artifact of how
+    Django happened to walk an underconstrained graph. What actually matters is
+    the state at the anchor, which is what this checks.
+    """
+    from horillasetup import migrate_v1
+
+    db = "leave_anchor"
+    subprocess.run(["dropdb", "--if-exists", db], check=True)
+    subprocess.run(["createdb", db], check=True)
+    try:
+        restore_dump(db, HR_DUMP)
+
+        def at_anchor():
+            migrate_v1.reconcile_ledger(Path(V2_ROOT))
+            migrate_v1.migrate(Path(V2_ROOT), target=migrate_v1.LEAVE_COPY_ANCHOR)
+        _with_db(db, at_anchor)
+
+        def exists(table):
+            return psql(db, "select count(*) from information_schema.tables "
+                            f"where table_name='{table}'") == "1"
+
+        # source alive
+        assert exists("leave_holiday"), (
+            "leave_holiday is already gone at the anchor -- the copy would find "
+            "nothing. leave/0005 must have moved earlier in the plan."
+        )
+        assert exists("leave_companyleave")
+        # destination ready
+        assert exists("base_holidays"), (
+            "base_holidays does not exist yet at the anchor -- the copy would "
+            "have nowhere to write. base/0001 must have moved later."
+        )
+        assert exists("base_companyleaves")
+        # and there is something to carry
+        assert psql(db, "select count(*) from leave_holiday") != "0"
+    finally:
+        subprocess.run(["dropdb", "--if-exists", db], check=True)
 
 
 def test_holidays_survive(migrated):

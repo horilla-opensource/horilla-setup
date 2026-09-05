@@ -83,14 +83,19 @@ jobs:
           PGPORT: "5432"
           PGUSER: horilla
           PGPASSWORD: horilla
-          # The HR fixture (companies, employees, payroll, leave) is what the
-          # data-migration tests need; the user-only one is not enough.
-          HORILLA_SEED_HR_DATA: "1"
         run: |
           chmod +x tests/fixtures/build_v1.sh
           for tag in $V1_TAGS; do
             echo "::group::v1 $tag"
+            # Both variants. The plain dump is what the schema-level tests
+            # restore; the HR-seeded one (companies, employees, payroll, leave)
+            # is what the data-migration tests need. Building only the seeded
+            # one leaves the others skipping silently, which is how a first CI
+            # run reported green-ish while a third of the suite never ran.
+            # The venv and clone are reused between the two, so the second
+            # pass costs seconds rather than minutes.
             tests/fixtures/build_v1.sh "$tag"
+            HORILLA_SEED_HR_DATA=1 tests/fixtures/build_v1.sh "$tag"
             echo "::endgroup::"
           done
           ls -la /tmp/horilla-v1-fixtures/*.dump

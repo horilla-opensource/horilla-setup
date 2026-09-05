@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import database_url, dump_path, psql
+from conftest import database_url, dump_path, psql, restore_dump
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 V2_ROOT = Path(os.environ.get("HORILLA_V2_ROOT", ""))
@@ -72,14 +72,16 @@ def _run(db, script=None, args=None):
         tmp.unlink(missing_ok=True)
 
 
-def _restore(db, tag="1.6.1", suffix="_full"):
-    path = dump_path(tag).replace(".dump", f"{suffix}.dump")
+def _restore(db, tag="1.6.1"):
+    """These tests need the HR-seeded fixture (companies, employees, payroll);
+    the user-only one would leave most assertions with nothing to check."""
+    path = dump_path(tag, "_full")
     if not os.path.exists(path):
-        pytest.skip(f"no fixture at {path}")
+        pytest.skip(f"no HR fixture at {path}; "
+                    f"run HORILLA_SEED_HR_DATA=1 tests/fixtures/build_v1.sh {tag}")
     subprocess.run(["dropdb", "--if-exists", db], check=True)
     subprocess.run(["createdb", db], check=True)
-    subprocess.run(["pg_restore", "-d", db, "--no-owner", "--no-privileges", path],
-                   capture_output=True, check=False)
+    restore_dump(db, path)
 
 
 def _migrate(db):

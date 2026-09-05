@@ -34,8 +34,55 @@ SCHEMA_VARIANTS = {
 WORKDIR = os.environ.get("HORILLA_V1_WORKDIR", "/tmp/horilla-v1-fixtures")
 
 
-def dump_path(tag):
-    return os.path.join(WORKDIR, f"v1_{tag}.dump")
+def dump_path(tag, variant=""):
+    """Where build_v1.sh writes a fixture.
+
+    The suffix is not cosmetic: seeding HR data makes the builder write
+    v1_<tag>_full.dump instead of v1_<tag>.dump. A caller that wants either
+    should use find_dump().
+    """
+    return os.path.join(WORKDIR, f"v1_{tag}{variant}.dump")
+
+
+def find_dump(tag):
+    """A fixture for `tag`, preferring the plain one, or None.
+
+    Exists because a test cannot assume which variants were built. CI builds
+    both; a developer may have built only one.
+
+    The PLAIN dump is preferred, not the HR-seeded superset. Treating _full as
+    a drop-in was tried and broke test_v1_fixtures, which characterises the
+    plain fixture exactly -- 10 users, 5 with a null last_login. The seeded one
+    has 16 and 11. A test that needs HR data asks for dump_path(tag, "_full")
+    explicitly rather than hoping this returns it.
+    """
+    for variant in ("", "_full"):
+        candidate = dump_path(tag, variant)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def restore_dump(db, path):
+    """Restore `path` into `db`, and fail loudly if nothing arrived.
+
+    pg_restore exits non-zero on ownership and ACL warnings that are harmless
+    here, so its exit code cannot be trusted -- but it was previously ignored
+    entirely with check=False, which meant a restore that produced NOTHING was
+    indistinguishable from one that worked. Tests then ran against an empty
+    database and failed much later with a baffling "relation does not exist".
+
+    So the result is checked rather than the exit code.
+    """
+    subprocess.run(
+        ["pg_restore", "-d", db, "--no-owner", "--no-privileges", path],
+        capture_output=True, check=False,
+    )
+    if table_count(db) == 0:
+        raise AssertionError(
+            f"pg_restore produced no tables in {db} from {path}. "
+            "The dump is missing or unreadable."
+        )
 
 
 def database_url(db):
@@ -90,7 +137,7 @@ MIGRATION_TAGS = ["1.3.2", "1.6.1"]   # one per physical schema variant
 def migration_tag(request):
     """One tag per schema variant, for tests that run a full migration."""
     tag = request.param
-    if not os.path.exists(dump_path(tag)):
+    if find_dump(tag) is None:
         pytest.skip(f"no fixture for {tag}; run fixtures/build_v1.sh {tag}")
     return tag
 
@@ -101,11 +148,7 @@ def migration_db(migration_tag):
     db = f"mig_e2e_{migration_tag.replace('.', '_')}"
     subprocess.run(["dropdb", "--if-exists", db], check=True)
     subprocess.run(["createdb", db], check=True)
-    subprocess.run(
-        ["pg_restore", "-d", db, "--no-owner", "--no-privileges",
-         dump_path(migration_tag)],
-        capture_output=True, check=False,
-    )
+    restore_dump(db, find_dump(migration_tag))
     yield db
     subprocess.run(["dropdb", "--if-exists", db], check=True)
 
@@ -117,7 +160,7 @@ def v1_tag(request):
     Parameterised rather than looped so a failure names the tag it failed on.
     """
     tag = request.param
-    if not os.path.exists(dump_path(tag)):
+    if find_dump(tag) is None:
         pytest.skip(f"no fixture for {tag}; run fixtures/build_v1.sh {tag}")
     return tag
 
@@ -133,9 +176,6 @@ def v1_db(v1_tag):
     db = f"mig_test_{v1_tag.replace('.', '_')}"
     subprocess.run(["dropdb", "--if-exists", db], check=True)
     subprocess.run(["createdb", db], check=True)
-    subprocess.run(
-        ["pg_restore", "-d", db, "--no-owner", "--no-privileges", dump_path(v1_tag)],
-        capture_output=True, check=False,  # pg_restore warns on owner/ACL; not fatal
-    )
+    restore_dump(db, find_dump(v1_tag))
     yield db
     subprocess.run(["dropdb", "--if-exists", db], check=True)
