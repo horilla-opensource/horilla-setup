@@ -154,14 +154,19 @@ Six stages, each protecting the next:
 | 2. Pre-flight | Finds data that would fail partway through, while it is still safe to stop |
 | 3. Backup | `pg_dump` of the whole database, before anything is written |
 | 4. Ledger | Reconciles `django_migrations` with v2's migrations |
-| 5. Migrate | Applies v2's schema over v1's, adopting the tables that already exist |
-| 6. Verify | Checks users, passwords and relationships actually survived |
+| 5. Migrate | Applies v2's schema over v1's, adopting the tables that already exist, and carries across data v2 would otherwise drop |
+| 6. Verify | Checks users, passwords, holidays and relationships actually survived |
 
 Nothing before stage 3 writes to the database, so a refusal in stage 1 or 2
 leaves your database exactly as it was.
 
 Your users keep their existing passwords — the stored hashes are carried
 across untouched, not reset.
+
+Holidays and company leave rules are carried across too. v2 moves both from the
+`leave` app to `base` without a data step of its own, so a plain `migrate`
+destroys them while reporting success; the tool copies them in the window
+between the new table being created and the old one being dropped.
 
 ### Options
 
