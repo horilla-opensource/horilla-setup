@@ -48,6 +48,15 @@ else
   echo "--> reusing $SRC"
 fi
 
+# Completeness is checked by importing Django, not by the directory existing.
+# An interrupted pip install leaves .venv present but unusable, and the next
+# run would skip straight past it to fail much later with a bare
+# "Couldn't import Django" from manage.py. Seen for real after a timeout.
+if [ -d "$SRC/.venv" ] && ! "$SRC/.venv/bin/python" -c "import django" 2>/dev/null; then
+  echo "--> discarding incomplete venv (interrupted install)"
+  rm -rf "$SRC/.venv"
+fi
+
 if [ ! -d "$SRC/.venv" ]; then
   echo "--> creating venv (v1 pins Django 4.2; v2 uses 5.2, so this must be separate)"
   python3 -m venv "$SRC/.venv"

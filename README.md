@@ -1,5 +1,7 @@
 # 🛠️ Horilla Setup CLI (`horillasetup`)
 
+[![migration tests](https://github.com/horilla/horilla-setup/actions/workflows/migration-tests.yml/badge.svg)](https://github.com/horilla/horilla-setup/actions/workflows/migration-tests.yml)
+
 The **Horilla Setup CLI** is a lightweight, cross-platform command-line tool designed to streamline the **initialization**, **migration**, **upgrade**, and **dependency management** processes across the **Horilla ecosystem** — including **HRMS v1**, **HRMS v2**, and the newly released **Horilla CRM**.
 
 It automates repetitive setup tasks like environment preparation, Git cloning, dependency installation, and migration handling — ensuring a smooth, consistent workflow for developers and deployment teams.
@@ -221,6 +223,43 @@ horillasetup migrate crm
 # Upgrade project later
 horillasetup upgrade crm
 ```
+
+---
+
+## 🧪 Development
+
+The v1 → v2 migration has a test suite that runs against **real Postgres** and
+**real v1 databases** built from real Horilla release tags. Nothing is mocked:
+the thing under test is a schema migration, and an ORM-level fixture would
+abstract away exactly what can break.
+
+```bash
+python -m venv .venv
+.venv/bin/pip install pytest psycopg2-binary
+.venv/bin/pip install -e .
+.venv/bin/python -m pytest tests -q          # skips what it cannot reach
+```
+
+Tests skip cleanly when their inputs are absent, so that always runs. To
+exercise the migration itself you need the fixtures and a v2 checkout:
+
+```bash
+# ~15 min the first time: each tag is a full clone and pip install
+for tag in 1.3.2 1.4.0 1.5.0 1.6.0 1.6.1; do
+    HORILLA_SEED_HR_DATA=1 tests/fixtures/build_v1.sh "$tag"
+done
+
+HORILLA_V2_ROOT=/path/to/horilla-hr \
+HORILLA_V2_PYTHON=/path/to/horilla-hr/.venv/bin/python \
+  .venv/bin/python -m pytest tests -q
+```
+
+See `tests/README.md` for the environment variables and what each module covers.
+
+CI runs the same suite on every push, and weekly against Horilla v2's
+`dev/v2.0`. The weekly run is the point: v2 moves independently of this tool, so
+a green run today says nothing about tomorrow — most sharply for the migration
+ordering that the holiday data copy depends on, which would break silently.
 
 ---
 

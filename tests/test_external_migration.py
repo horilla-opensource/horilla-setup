@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import dump_path, psql
+from conftest import database_url, dump_path, psql
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 V2_ROOT = Path(os.environ.get("HORILLA_V2_ROOT", ""))
@@ -54,7 +54,7 @@ def _run(db, script=None, args=None):
     env_file = V2_ROOT / ".env"
     original = env_file.read_text()
     env_file.write_text("\n".join(
-        f"DATABASE_URL=postgres://{os.environ.get('USER')}@localhost:5432/{db}"
+        f"DATABASE_URL={database_url(db)}"
         if line.startswith("DATABASE_URL=") else line
         for line in original.splitlines()
     ))

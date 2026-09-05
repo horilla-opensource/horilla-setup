@@ -38,6 +38,23 @@ def dump_path(tag):
     return os.path.join(WORKDIR, f"v1_{tag}.dump")
 
 
+def database_url(db):
+    """A DATABASE_URL for `db` honouring libpq's own environment variables.
+
+    The tests shell out to psql/pg_restore, which read PGHOST/PGUSER/PGPASSWORD
+    themselves, but Django needs the same connection spelled out. Hardcoding
+    $USER@localhost with no password works on a developer's machine and fails
+    everywhere else -- notably CI, where the OS user is `runner` and the
+    Postgres role has a password.
+    """
+    user = os.environ.get("PGUSER") or os.environ.get("USER", "postgres")
+    password = os.environ.get("PGPASSWORD", "")
+    host = os.environ.get("PGHOST", "localhost")
+    port = os.environ.get("PGPORT", "5432")
+    credentials = f"{user}:{password}" if password else user
+    return f"postgres://{credentials}@{host}:{port}/{db}"
+
+
 def psql(db, sql):
     """One scalar value out of psql. Raises on a non-zero exit."""
     out = subprocess.run(
