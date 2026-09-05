@@ -221,21 +221,111 @@ print("::ordering", len(clear_auth_ordering_conflicts(connection)))
     return _emit(result)
 
 
+# --- stage 5a: the leave data v2 destroys ----------------------------------
+
+# v2 moves Holiday and CompanyLeave from the `leave` app to `base`, with a
+# CreateModel in base and a DeleteModel in leave and no data step between them.
+# Without this copy, every holiday and company-leave rule a customer configured
+# is silently destroyed -- confirmed against a real 1.6.1 database: 1 row in,
+# 0 out, with `migrate` reporting success throughout.
+#
+# The copy has to happen inside a specific window, which is narrower than it
+# looks. Migration plan positions, measured rather than assumed:
+#
+#     16  base/0001   creates base_holidays
+#     43  leave/0005  DESTROYS leave_holiday        <- source gone after here
+#     84  base/0012   converts companyleaves.company_id FK -> M2M
+#
+# So there is no single point where the source still exists AND the destination
+# has its final shape. The copy runs in the 16-43 window, while company_id is
+# still a plain FK column; base/0012 then converts what was copied, exactly as
+# it would for a fresh install's own rows.
+LEAVE_COPY_ANCHOR = ("leave", "0004_employeepastleaverestrict_company_id")
+
+# Verified identical at the anchor point, so the copy is column-for-column.
+# is_specific is deliberately absent: it arrives later in base/0006 and takes
+# its model default, which is the right reading of a v1 holiday that had no
+# such concept.
+_HOLIDAY_COLUMNS = (
+    "id", "name", "start_date", "end_date", "recurring",
+    "is_active", "created_at", "created_by_id", "modified_by_id", "company_id_id",
+)
+_COMPANY_LEAVE_COLUMNS = (
+    "id", "based_on_week", "based_on_week_day",
+    "is_active", "created_at", "created_by_id", "modified_by_id", "company_id_id",
+)
+
+
+_COPY_SCRIPT = """
+from django.db import connection
+
+MOVES = [
+    ("leave_holiday", "base_holidays", {holiday}),
+    ("leave_companyleave", "base_companyleaves", {company_leave}),
+]
+
+with connection.cursor() as c:
+    def exists(table):
+        c.execute(
+            "select 1 from information_schema.tables "
+            "where table_schema = current_schema() and table_name = %s",
+            [table],
+        )
+        return c.fetchone() is not None
+
+    for source, target, columns in MOVES:
+        if not (exists(source) and exists(target)):
+            continue
+        names = ", ".join(columns)
+        # `where not exists` makes this idempotent: a re-run after a failed
+        # migration neither duplicates rows nor overwrites edited ones.
+        c.execute(
+            f"insert into {{target}} ({{names}}) "
+            f"select {{names}} from {{source}} "
+            f"where not exists ("
+            f"  select 1 from {{target}} t where t.id = {{source}}.id)"
+        )
+        print(f"::{{target}} {{c.rowcount}}")
+"""
+
+
+def copy_leave_data(project: Path) -> dict:
+    """Copy Holiday and CompanyLeave from `leave` into `base`.
+
+    Idempotent: rows already present are left alone, so a re-run after a failed
+    migration does not duplicate or overwrite them.
+    """
+    result = _run_script(project, _COPY_SCRIPT.format(
+        holiday=_HOLIDAY_COLUMNS, company_leave=_COMPANY_LEAVE_COLUMNS,
+    ), adopt=True)
+    if result.returncode != 0:
+        raise MigrationError(f"could not copy leave data:\n{result.stderr[-1500:]}")
+    return _emit(result)
+
+
 # --- stage 5 ---------------------------------------------------------------
 
-def migrate(project: Path) -> None:
+def migrate(project: Path, target: tuple | None = None) -> None:
     """Apply v2's migrations with schema adoption active.
 
     Streams output rather than capturing it: this is the slow stage (~2
     minutes) and silence here reads as a hang.
+
+    `target` stops at a specific migration, which is how the leave-data copy
+    gets a window between the table being created and its source destroyed.
     """
+    args = ["migrate"]
+    if target:
+        args += list(target)
+    args.append("--noinput")
+
     # This subprocess writes straight to the terminal. Without flushing first,
     # everything this tool has printed so far is still buffered and lands after
     # it -- making the log read as though migrate ran before the stages that
     # gate it.
     sys.stdout.flush()
     result = subprocess.run(
-        [_project_python(project), "manage.py", "migrate", "--noinput"],
+        [_project_python(project), "manage.py", *args],
         cwd=project, env=_env(project, adopt=True),
     )
     if result.returncode != 0:
@@ -274,6 +364,8 @@ with connection.cursor() as c:
     print("::hashes", scalar(
         "select coalesce(md5(string_agg(username||password, ',' order by username)), '') "
         "from horilla_auth_horillauser"))
+    print("::holidays", scalar("select count(*) from base_holidays"))
+    print("::company_leaves", scalar("select count(*) from base_companyleaves"))
 """)
     if result.returncode != 0:
         raise MigrationError(f"verification could not run:\n{result.stderr[-1500:]}")
@@ -297,6 +389,16 @@ with connection.cursor() as c:
         problems.append(
             "password hashes changed -- users would be unable to log in"
         )
+    # v2 moves these between apps with no data step of its own. Checked
+    # explicitly because the failure is silent: migrate reports success while
+    # every configured holiday is destroyed.
+    for key, label in (("holidays", "holiday"), ("company_leaves", "company leave")):
+        lost = int(before.get(key, 0)) - int(after.get(key, 0))
+        if lost > 0:
+            problems.append(
+                f"{lost} {label} record(s) did not survive the move from the "
+                "leave app to base"
+            )
     return problems
 
 
@@ -316,6 +418,10 @@ with connection.cursor() as c:
     print("::hashes", scalar(
         "select coalesce(md5(string_agg(username||password, ',' order by username)), '') "
         "from auth_user"))
+    # v2 destroys these unless they are carried across; counted here so
+    # stage 6 can prove they were.
+    print("::holidays", scalar("select count(*) from leave_holiday"))
+    print("::company_leaves", scalar("select count(*) from leave_companyleave"))
 """)
     if result.returncode != 0:
         raise MigrationError(f"could not read the database:\n{result.stderr[-1500:]}")
@@ -384,6 +490,18 @@ def run(project: Path, backup_dir: Path | None = None,
     print(f"   {ledger.get('ordering', '0')} rows reordered for the new user model\n")
 
     print("🚀 Stage 5/6 — applying v2 migrations (this takes a few minutes)\n")
+    # Two passes. v2 moves Holiday and CompanyLeave from `leave` to `base`
+    # without a data step, so the first pass stops just before the migration
+    # that destroys the source, the rows are copied, and the second pass
+    # finishes. See LEAVE_COPY_ANCHOR for why this window and not another.
+    migrate(project, target=LEAVE_COPY_ANCHOR)
+
+    copied = copy_leave_data(project)
+    moved = sum(int(v) for v in copied.values() if v.isdigit())
+    if moved:
+        print(f"\n   carried {moved} holiday/company-leave row(s) across the "
+              "app move\n")
+
     migrate(project)
 
     print("\n🔎 Stage 6/6 — verifying\n")

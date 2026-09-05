@@ -155,17 +155,65 @@ horillasetup upgrade crm
 
 # 🔁 4. HRMS v1 → HRMS v2 Database Upgrade
 
-To migrate an existing v1 database into v2:
+Migrates an existing Horilla v1 database to v2 **in place**, keeping every
+user, password and record.
 
 ```bash
-horillasetup migrate hrms-v2 --existing
+cd /path/to/your/horilla-v2
+horillasetup migrate hrms-v2 --from-v1
 ```
 
-This performs:
+**Supported source versions: 1.3.2 through 1.6.1.** Anything else is refused
+rather than attempted — across that whole range there are only two physical
+schema shapes, and the tool detects which one it is looking at.
 
-* Safe clearing of old migration entries
-* Faked compatibility migrations
-* Full v2 migration + static collection
+### What it does
+
+Six stages, each protecting the next:
+
+| Stage | What it does |
+|---|---|
+| 1. Fingerprint | Confirms this really is a supported v1 database |
+| 2. Pre-flight | Finds data that would fail partway through, while it is still safe to stop |
+| 3. Backup | `pg_dump` of the whole database, before anything is written |
+| 4. Ledger | Reconciles `django_migrations` with v2's migrations |
+| 5. Migrate | Applies v2's schema over v1's, adopting the tables that already exist |
+| 6. Verify | Checks users, passwords and relationships actually survived |
+
+Nothing before stage 3 writes to the database, so a refusal in stage 1 or 2
+leaves your database exactly as it was.
+
+Your users keep their existing passwords — the stored hashes are carried
+across untouched, not reset.
+
+### Options
+
+```bash
+--from-v1              Migrate an existing v1 database
+--backup-dir PATH      Where to write the backup (default: ./horilla-migration-backups)
+--skip-backup          Do not back up first. The migration then cannot be undone
+-y, --yes              Do not prompt for confirmation
+```
+
+### If something goes wrong
+
+Restore the backup from stage 3:
+
+```bash
+dropdb horilla && createdb horilla
+pg_restore -d horilla --no-owner --no-privileges \
+    horilla-migration-backups/horilla-v1-<timestamp>.dump
+```
+
+Running the command twice is safe: an already-migrated database is detected
+and refused.
+
+### `--existing` has been removed
+
+The old `--existing` flag deleted the migration ledger and faked every
+migration. That left the database recording itself as v2 while the schema was
+still v1, so tables that v2 added were never created — with no backup and no
+way to notice. It now exits with a pointer to `--from-v1` rather than running.
 
 ---
 
