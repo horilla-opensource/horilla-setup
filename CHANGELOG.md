@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.1
+
+### Fixed: a migration could abort part-way on a database with a stale id sequence
+
+A customer migration failed in stage 5 with
+
+```
+psycopg2.errors.UniqueViolation: duplicate key value violates unique constraint
+"django_content_type_pkey"
+DETAIL:  Key (id)=(219) already exists.
+```
+
+Their `django_content_type` sequence was sitting below the highest id the table
+held. Nothing notices such a sequence until something inserts without naming an
+id, and `migrate`'s `post_migrate` signal does exactly that -- it runs
+`create_contenttypes` and `create_permissions`, which insert a row per model v2
+adds.
+
+The stale sequence predates the migration: it is what a database looks like
+after rows have been inserted with explicit primary keys, via a `loaddata`, a
+copy between environments, or a restore that did not reset sequences. The
+migration is simply the first thing to insert enough rows to hit it, so it took
+the blame and the operator took a restore.
+
+Stage 4 now moves every `id` sequence up to its table's true maximum before
+`migrate` runs, and reports how many it reset. Empty tables and healthy
+sequences are left alone. `setval` to `max(id)` is idempotent and can only move
+a sequence forward to a value that was already correct.
+
+Every table is checked rather than only `django_content_type` -- that is merely
+the one `post_migrate` reaches first, and any table whose sequence is behind
+would fail the same way the moment v2 inserts into it.
+
+
 ## 1.1.0
 
 ### Migrate a Horilla v1 database to v2

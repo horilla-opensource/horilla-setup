@@ -7,3 +7,6 @@ build/
 horillasetup.egg-info/
 dist/
 dist-test/
+
+# Local virtualenv used for running the test suite
+venv/

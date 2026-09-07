@@ -356,3 +356,82 @@ def unapply_colliding_ledger_rows(connection) -> list:
             )
     logger.info("unapplied %d colliding ledger rows", len(collisions))
     return collisions
+
+
+def resync_sequences(connection) -> list:
+    """Move every ``id`` sequence up to the highest id its table actually holds.
+
+    Returns the sequences that were behind, as (table, sequence, was, now).
+
+    A v1 database that has ever had rows inserted with explicit primary keys --
+    a ``loaddata``, a data copy between environments, a restore that did not
+    reset sequences -- carries a sequence sitting below ``max(id)``. Nothing
+    notices until something inserts without naming an id.
+
+    ``migrate`` does exactly that. Its ``post_migrate`` signal runs
+    ``create_contenttypes`` and ``create_permissions``, which ``bulk_create``
+    rows for every model v2 adds, taking ids from the sequence. When the
+    sequence is behind, the insert lands on a row that already exists:
+
+        psycopg2.errors.UniqueViolation: duplicate key value violates unique
+        constraint "django_content_type_pkey"
+        DETAIL:  Key (id)=(219) already exists.
+
+    That aborted a real customer migration part-way through stage 5, with the
+    schema half-changed. The condition predates the migration -- it is a latent
+    fault in the source database -- but this is the first thing that inserts
+    enough rows to hit it, so the migration gets the blame and the operator gets
+    a restore.
+
+    Repairing rather than refusing: ``setval`` to ``max(id)`` is the standard
+    fix, it is idempotent, and it can only move a sequence forward to a value
+    that was already correct. Refusing would hand the operator a manual SQL
+    chore for a problem the tool can simply resolve.
+
+    Every table is checked, not just ``django_content_type``. That one is what
+    the customer hit because ``post_migrate`` inserts there first, but any table
+    whose sequence is behind would fail the same way the moment v2 inserts into
+    it, and there is no reason to find them one restore at a time.
+    """
+    repaired = []
+    with connection.cursor() as cur:
+        cur.execute(
+            """
+            select c.relname,
+                   pg_get_serial_sequence(quote_ident(c.relname), a.attname)
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            join pg_attribute a on a.attrelid = c.oid
+            where n.nspname = 'public'
+              and c.relkind = 'r'
+              and a.attname = 'id'
+              and not a.attisdropped
+              and pg_get_serial_sequence(quote_ident(c.relname), a.attname)
+                  is not null
+            """
+        )
+        candidates = cur.fetchall()
+
+        for table, sequence in candidates:
+            cur.execute(f'select max(id) from "{table}"')
+            max_id = cur.fetchone()[0]
+            if max_id is None:
+                # Empty table: leave the sequence alone. Forcing it to 1 with
+                # is_called=true would skip id 1 on the first insert.
+                continue
+
+            cur.execute("select last_value, is_called from %s" % sequence)
+            last_value, is_called = cur.fetchone()
+            current = last_value if is_called else last_value - 1
+            if current >= max_id:
+                continue
+
+            cur.execute("select setval(%s, %s, true)", [sequence, max_id])
+            repaired.append((table, sequence, current, max_id))
+            logger.info(
+                "sequence %s was at %s but %s holds ids up to %s -- reset",
+                sequence, current, table, max_id,
+            )
+
+    logger.info("resynced %d sequences", len(repaired))
+    return repaired

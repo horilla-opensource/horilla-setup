@@ -212,9 +212,11 @@ def reconcile_ledger(project: Path) -> dict:
 from django.db import connection
 from horillasetup.migration.adopt import (
     unapply_colliding_ledger_rows, clear_auth_ordering_conflicts,
+    resync_sequences,
 )
 print("::collisions", len(unapply_colliding_ledger_rows(connection)))
 print("::ordering", len(clear_auth_ordering_conflicts(connection)))
+print("::sequences", len(resync_sequences(connection)))
 """)
     if result.returncode != 0:
         raise MigrationError(f"ledger reconciliation failed:\n{result.stderr[-1500:]}")
@@ -487,7 +489,8 @@ def run(project: Path, backup_dir: Path | None = None,
     print("📒 Stage 4/6 — reconciling the migration ledger\n")
     ledger = reconcile_ledger(project)
     print(f"   {ledger.get('collisions', '0')} colliding migration names unapplied")
-    print(f"   {ledger.get('ordering', '0')} rows reordered for the new user model\n")
+    print(f"   {ledger.get('ordering', '0')} rows reordered for the new user model")
+    print(f"   {ledger.get('sequences', '0')} id sequences reset to match their table\n")
 
     print("🚀 Stage 5/6 — applying v2 migrations (this takes a few minutes)\n")
     # Two passes. v2 moves Holiday and CompanyLeave from `leave` to `base`
