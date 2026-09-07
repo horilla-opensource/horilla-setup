@@ -2,6 +2,56 @@
 
 ## 1.1.1
 
+### Fixed: the holiday copy silently dropped rows when the target already had data
+
+The copy that carries Holiday and CompanyLeave from `leave` into `base` was
+idempotent on `id`:
+
+```sql
+where not exists (select 1 from base_holidays t where t.id = leave_holiday.id)
+```
+
+That is correct only when `base_holidays` is empty or holds rows previously
+copied from `leave_holiday`. On a v1 where holidays already live in `base` --
+which is the case from some 1.x versions onward -- `base_holidays` holds
+unrelated rows at ids 1..n, every source id collides, and every source row is
+discarded as "already present". The run reports 0 carried, prints nothing, and
+the migration reports success. Silent loss of exactly the data this copy exists
+to protect.
+
+Measured on a reconstruction of a real customer database: 3 rows in
+`leave_holiday`, 0 copied, no warning.
+
+The copy now matches on a natural key -- `(name, start_date)` for holidays and
+`(based_on_week, based_on_week_day)` for company leaves, the latter being v2's
+own `unique_together` -- and no longer copies `id`, letting the target assign
+fresh ones. `is not distinct from` is used rather than `=` so that nullable
+columns match instead of never matching.
+
+Dropping `id` is safe: the v1 schema has no inbound foreign keys to
+`leave_holiday` or `leave_companyleave`, and v2's M2M join tables are created by
+the migration and empty when the copy runs. Both were verified rather than
+assumed.
+
+Every existing test for this copy started from an empty `base_holidays`, which
+is why the defect shipped.
+
+### Fixed: uniqueness v2 adds that v1 data violates aborted the migration at stage 5
+
+A customer's migration died building `unique_work_record_per_employee_per_date`.
+Horilla's own demo data contains 111 colliding `(employee, date)` pairs across
+225 work records, so any v1 install that loaded the sample data hits it -- and
+hits it part-way through stage 5, with a half-changed schema and a restore.
+
+Pre-flight now checks every uniqueness rule v2 introduces -- 13
+`unique_together` plus the `UniqueConstraint` set -- against the source database
+before the backup is taken, and names the table, the columns and the number of
+duplicates. Columns are resolved by asking the database whether the model field
+is `field` or `field_id`, because Django's `_id` suffixing is not derivable from
+the field list. NULLs are excluded, since Postgres treats them as distinct in a
+unique index and reporting them would send the operator hunting a duplicate the
+migration will accept.
+
 ### Fixed: a migration could abort part-way on a database with a stale id sequence
 
 A customer migration failed in stage 5 with

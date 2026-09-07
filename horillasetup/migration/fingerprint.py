@@ -177,9 +177,109 @@ def fingerprint(connection) -> Fingerprint:
 # Checked up front so the operator learns now, not at 60%.
 
 
+# Uniqueness that v2 introduces and v1 never enforced. Every one of these is a
+# migration that fails at the moment the index is built, part-way through
+# stage 5, leaving a half-changed schema and a restore.
+#
+# Found the hard way: a customer's migration died on
+# unique_work_record_per_employee_per_date, and Horilla's own demo data turns
+# out to contain 111 colliding (employee, date) pairs across 225 work records --
+# so any v1 install that loaded the sample data hits it. The rest of this list
+# is every other unique_together and UniqueConstraint v2 adds, gathered in one
+# pass rather than discovered one restore at a time.
+#
+# (table, [model field names], what a duplicate means)
+V2_UNIQUENESS = [
+    ("attendance_workrecords", ["employee_id", "date"],
+     "more than one work record for the same employee on the same date"),
+    ("attendance_attendance", ["employee_id", "attendance_date"],
+     "more than one attendance row for the same employee on the same date"),
+    ("attendance_attendanceovertime", ["employee_id", "month", "year"],
+     "more than one overtime row for the same employee in the same month"),
+    ("attendance_attendancelatecomeearlyout", ["attendance_id", "type"],
+     "more than one late-come/early-out row of the same type per attendance"),
+    ("base_company", ["company", "address"],
+     "two companies with the same name and address"),
+    ("base_companyleaves", ["based_on_week", "based_on_week_day"],
+     "two company-leave rules for the same week and weekday"),
+    ("base_employeeshiftschedule", ["shift_id", "day"],
+     "two schedules for the same shift and day"),
+    ("base_jobrole", ["job_position_id", "job_role"],
+     "two job roles with the same name under one position"),
+    ("employee_employee", ["employee_first_name", "employee_last_name", "email"],
+     "two employees with the same name and email"),
+    ("leave_availableleave", ["leave_type_id", "employee_id"],
+     "more than one available-leave row per employee per leave type"),
+    ("offboarding_employeetask", ["employee_id", "task_id"],
+     "the same offboarding task assigned twice to one employee"),
+    ("pms_employeeobjective", ["employee_id", "objective_id"],
+     "the same objective assigned twice to one employee"),
+    ("recruitment_candidate", ["email", "recruitment_id"],
+     "the same email applying twice to one recruitment"),
+]
+
+
+def _resolve_column(cur, table, field):
+    """The real column for a model field: `field` or, for a FK, `field_id`.
+
+    v1 column names cannot be derived from the v2 field list by rule -- Django
+    appends _id to a ForeignKey, and several of these fields are already named
+    *_id in the model, giving columns like employee_id_id. Asking the database
+    is shorter than encoding that per field, and it cannot drift.
+    """
+    for candidate in (field, f"{field}_id"):
+        cur.execute(
+            "select 1 from information_schema.columns "
+            "where table_schema='public' and table_name=%s and column_name=%s",
+            [table, candidate],
+        )
+        if cur.fetchone():
+            return candidate
+    return None
+
+
+def _uniqueness_violations(connection) -> list:
+    """Rows that v2's new unique constraints would reject."""
+    problems = []
+    with connection.cursor() as cur:
+        for table, fields, description in V2_UNIQUENESS:
+            cur.execute(
+                "select 1 from information_schema.tables "
+                "where table_schema='public' and table_name=%s",
+                [table],
+            )
+            if not cur.fetchone():
+                continue  # optional app not installed on this database
+
+            columns = [_resolve_column(cur, table, f) for f in fields]
+            if any(c is None for c in columns):
+                continue  # this v1 predates the field; nothing to collide
+
+            quoted = ", ".join(f'"{c}"' for c in columns)
+            # Postgres treats NULLs as distinct in a unique index, so rows with
+            # a NULL in any of these columns cannot collide and must not be
+            # counted -- reporting them would send the operator hunting for a
+            # duplicate the migration is going to accept.
+            not_null = " and ".join(f'"{c}" is not null' for c in columns)
+            cur.execute(
+                f'select count(*) from ('
+                f'  select {quoted} from "{table}" where {not_null}'
+                f'  group by {quoted} having count(*) > 1) d'
+            )
+            duplicates = cur.fetchone()[0]
+            if duplicates:
+                problems.append(
+                    f"{table}: {duplicates} duplicate value(s) of "
+                    f"({', '.join(columns)}) -- {description}. v2 makes this "
+                    "combination unique, so the migration would fail when it "
+                    "builds the index. De-duplicate before migrating."
+                )
+    return problems
+
+
 def preflight(connection) -> list:
     """Return a list of blocking problems. Empty means clear to proceed."""
-    problems = []
+    problems = list(_uniqueness_violations(connection))
 
     with connection.cursor() as cur:
         # v2 makes RecruitmentGeneralSetting.company_id a OneToOneField.
