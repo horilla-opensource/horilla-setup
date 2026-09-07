@@ -212,9 +212,11 @@ def reconcile_ledger(project: Path) -> dict:
 from django.db import connection
 from horillasetup.migration.adopt import (
     unapply_colliding_ledger_rows, clear_auth_ordering_conflicts,
+    resync_sequences,
 )
 print("::collisions", len(unapply_colliding_ledger_rows(connection)))
 print("::ordering", len(clear_auth_ordering_conflicts(connection)))
+print("::sequences", len(resync_sequences(connection)))
 """)
     if result.returncode != 0:
         raise MigrationError(f"ledger reconciliation failed:\n{result.stderr[-1500:]}")
@@ -246,22 +248,42 @@ LEAVE_COPY_ANCHOR = ("leave", "0004_employeepastleaverestrict_company_id")
 # is_specific is deliberately absent: it arrives later in base/0006 and takes
 # its model default, which is the right reading of a v1 holiday that had no
 # such concept.
+# `id` is deliberately absent. Copying the source id made the de-duplication
+# key the id too, and that silently dropped rows: on any v1 where holidays
+# already live in `base`, base_holidays 1..11 collide with leave_holiday 1..3
+# and all three source rows are discarded as "already present". Measured on a
+# reconstruction of a real customer's database: 3 rows in, 0 copied, 0
+# reported, migration reports success. Silent loss of exactly the data this
+# copy exists to save.
+#
+# Dropping id is safe because nothing references these rows by it: the v1
+# schema has no inbound foreign keys to leave_holiday or leave_companyleave,
+# and v2's own M2M join tables (base_holidays_department and friends) are
+# created by the migration and still empty when the copy runs.
 _HOLIDAY_COLUMNS = (
-    "id", "name", "start_date", "end_date", "recurring",
+    "name", "start_date", "end_date", "recurring",
     "is_active", "created_at", "created_by_id", "modified_by_id", "company_id_id",
 )
 _COMPANY_LEAVE_COLUMNS = (
-    "id", "based_on_week", "based_on_week_day",
+    "based_on_week", "based_on_week_day",
     "is_active", "created_at", "created_by_id", "modified_by_id", "company_id_id",
 )
+
+# What makes a row "the same row" for re-run purposes, now that id cannot.
+# For company leaves this is also v2's own unique_together, so matching on it
+# is required rather than merely reasonable.
+_NATURAL_KEYS = {
+    "base_holidays": ("name", "start_date"),
+    "base_companyleaves": ("based_on_week", "based_on_week_day"),
+}
 
 
 _COPY_SCRIPT = """
 from django.db import connection
 
 MOVES = [
-    ("leave_holiday", "base_holidays", {holiday}),
-    ("leave_companyleave", "base_companyleaves", {company_leave}),
+    ("leave_holiday", "base_holidays", {holiday}, {holiday_key}),
+    ("leave_companyleave", "base_companyleaves", {company_leave}, {company_leave_key}),
 ]
 
 with connection.cursor() as c:
@@ -273,17 +295,21 @@ with connection.cursor() as c:
         )
         return c.fetchone() is not None
 
-    for source, target, columns in MOVES:
+    for source, target, columns, key in MOVES:
         if not (exists(source) and exists(target)):
             continue
         names = ", ".join(columns)
-        # `where not exists` makes this idempotent: a re-run after a failed
-        # migration neither duplicates rows nor overwrites edited ones.
+        # Idempotent on the natural key, not on id. Matching on id silently
+        # dropped every source row whose id happened to exist in the target --
+        # which is every row, on a database where the target already holds
+        # unrelated data. The target assigns fresh ids.
+        match = " and ".join(
+            f"t.{{col}} is not distinct from {{source}}.{{col}}" for col in key
+        )
         c.execute(
             f"insert into {{target}} ({{names}}) "
             f"select {{names}} from {{source}} "
-            f"where not exists ("
-            f"  select 1 from {{target}} t where t.id = {{source}}.id)"
+            f"where not exists (select 1 from {{target}} t where {{match}})"
         )
         print(f"::{{target}} {{c.rowcount}}")
 """
@@ -297,6 +323,8 @@ def copy_leave_data(project: Path) -> dict:
     """
     result = _run_script(project, _COPY_SCRIPT.format(
         holiday=_HOLIDAY_COLUMNS, company_leave=_COMPANY_LEAVE_COLUMNS,
+        holiday_key=_NATURAL_KEYS["base_holidays"],
+        company_leave_key=_NATURAL_KEYS["base_companyleaves"],
     ), adopt=True)
     if result.returncode != 0:
         raise MigrationError(f"could not copy leave data:\n{result.stderr[-1500:]}")
@@ -487,7 +515,8 @@ def run(project: Path, backup_dir: Path | None = None,
     print("📒 Stage 4/6 — reconciling the migration ledger\n")
     ledger = reconcile_ledger(project)
     print(f"   {ledger.get('collisions', '0')} colliding migration names unapplied")
-    print(f"   {ledger.get('ordering', '0')} rows reordered for the new user model\n")
+    print(f"   {ledger.get('ordering', '0')} rows reordered for the new user model")
+    print(f"   {ledger.get('sequences', '0')} id sequences reset to match their table\n")
 
     print("🚀 Stage 5/6 — applying v2 migrations (this takes a few minutes)\n")
     # Two passes. v2 moves Holiday and CompanyLeave from `leave` to `base`

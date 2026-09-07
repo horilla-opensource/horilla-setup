@@ -187,3 +187,27 @@ def v1_db(v1_tag):
     restore_dump(db, find_dump(v1_tag, exact=True))
     yield db
     subprocess.run(["dropdb", "--if-exists", db], check=True)
+
+
+@pytest.fixture
+def pg_connection():
+    """A psycopg2 connection to a scratch database, dropped afterwards.
+
+    `resync_sequences` takes a live connection rather than shelling out, so it
+    needs one directly -- the psql helpers above return scalars from a
+    subprocess and cannot be handed to it.
+    """
+    import psycopg2
+
+    db = "horilla_seq_test"
+    subprocess.run(["dropdb", "--if-exists", db], check=False,
+                   capture_output=True)
+    subprocess.run(["createdb", db], check=True, capture_output=True)
+    conn = psycopg2.connect(database_url(db))
+    conn.autocommit = True
+    try:
+        yield conn
+    finally:
+        conn.close()
+        subprocess.run(["dropdb", "--if-exists", db], check=False,
+                       capture_output=True)
