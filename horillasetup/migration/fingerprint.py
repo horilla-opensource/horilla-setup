@@ -216,6 +216,17 @@ V2_UNIQUENESS = [
      "the same objective assigned twice to one employee"),
     ("recruitment_candidate", ["email", "recruitment_id"],
      "the same email applying twice to one recruitment"),
+    # Conditional UniqueConstraints. Each is declared with a condition that
+    # excludes NULL -- badge_id__isnull=False, company_id not null -- which is
+    # exactly what the NULL filter below already does, so they need no special
+    # handling. badge_id is the one most likely to bite: duplicate badge ids
+    # accumulate easily in a long-lived HR database and v1 never stopped them.
+    ("employee_employee", ["badge_id"],
+     "two employees sharing a badge id"),
+    ("facedetection_facedetection", ["company_id"],
+     "two face-detection configurations for one company"),
+    ("geofencing_geofencing", ["company_id"],
+     "two geofencing configurations for one company"),
 ]
 
 
@@ -282,41 +293,58 @@ def preflight(connection) -> list:
     problems = list(_uniqueness_violations(connection))
 
     with connection.cursor() as cur:
+        def table_exists(name):
+            """Optional apps leave their tables absent.
+
+            Both checks below used to query their table unconditionally, so
+            preflight raised UndefinedTable -- and therefore aborted the whole
+            migration -- on any v1 without the recruitment app installed. A
+            check that cannot run should be skipped, not fatal.
+            """
+            cur.execute(
+                "select 1 from information_schema.tables "
+                "where table_schema = 'public' and table_name = %s",
+                [name],
+            )
+            return cur.fetchone() is not None
+
         # v2 makes RecruitmentGeneralSetting.company_id a OneToOneField.
         # Duplicates make the unique constraint unsatisfiable, so the
         # migration would fail partway through with the schema half-changed.
         # Column is company_id_id: the model field is named company_id, and
         # Django appends _id to a ForeignKey's database column.
-        cur.execute("""
-            select count(*) from (
-                select company_id_id from recruitment_recruitmentgeneralsetting
-                where company_id_id is not null
-                group by company_id_id having count(*) > 1
-            ) dupes
-        """)
-        dupes = cur.fetchone()[0]
-        if dupes:
-            problems.append(
-                f"{dupes} company_id value(s) appear more than once in "
-                "recruitment_recruitmentgeneralsetting. v2 makes this field "
-                "one-to-one; de-duplicate before migrating."
-            )
+        if table_exists("recruitment_recruitmentgeneralsetting"):
+            cur.execute("""
+                select count(*) from (
+                    select company_id_id from recruitment_recruitmentgeneralsetting
+                    where company_id_id is not null
+                    group by company_id_id having count(*) > 1
+                ) dupes
+            """)
+            dupes = cur.fetchone()[0]
+            if dupes:
+                problems.append(
+                    f"{dupes} company_id value(s) appear more than once in "
+                    "recruitment_recruitmentgeneralsetting. v2 makes this field "
+                    "one-to-one; de-duplicate before migrating."
+                )
 
         # Orphaned user references already present in v1 would be blamed on
         # the migration afterwards. Establish that they predate it.
-        cur.execute("""
-            select count(*) from employee_employee e
-            where e.employee_user_id_id is not null
-              and not exists (
-                select 1 from auth_user u where u.id = e.employee_user_id_id
-              )
-        """)
-        orphans = cur.fetchone()[0]
-        if orphans:
-            problems.append(
-                f"{orphans} employee row(s) reference a user that does not "
-                "exist. Fix these before migrating; they are not caused by "
-                "the migration but will look like it afterwards."
-            )
+        if table_exists("employee_employee") and table_exists("auth_user"):
+            cur.execute("""
+                select count(*) from employee_employee e
+                where e.employee_user_id_id is not null
+                  and not exists (
+                    select 1 from auth_user u where u.id = e.employee_user_id_id
+                  )
+            """)
+            orphans = cur.fetchone()[0]
+            if orphans:
+                problems.append(
+                    f"{orphans} employee row(s) reference a user that does not "
+                    "exist. Fix these before migrating; they are not caused by "
+                    "the migration but will look like it afterwards."
+                )
 
     return problems

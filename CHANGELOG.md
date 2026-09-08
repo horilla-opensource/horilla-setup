@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.1.2
+
+### Fixed: three uniqueness rules were missing from the pre-flight check
+
+1.1.1 claimed to check every uniqueness rule v2 introduces. It checked the 13
+`unique_together` rules and one of the four `UniqueConstraint`s. Now added:
+
+* `unique_badge_id` -- two employees sharing a badge id. The likeliest of the
+  three to bite: v1 never enforced it and duplicates accumulate quietly in a
+  long-lived database.
+* `unique_company_id_when_not_null_facedetection`
+* `unique_company_id_when_not_null_geofencing`
+
+All three are conditional on NOT NULL, which the existing NULL filter already
+matches, so they needed no special handling -- only listing. Sixteen rules are
+now checked.
+
+### Fixed: stage 6 could not see the holiday loss it was written to catch
+
+The check compared rows in the source before the migration against rows in the
+destination after it:
+
+    lost = count(leave_holiday) - count(base_holidays)
+
+On a v1 that already stores holidays in `base` the destination arrives holding
+its own rows, so the subtraction read `3 - 11 = -8` and reported success while
+three holidays were silently dropped. The 1.1.1 copy bug therefore passed
+through both the copy *and* the verification written specifically to catch it;
+it was found by counting rows by hand.
+
+Both sides now count distinct natural keys -- `(name, start_date)` for holidays,
+`(based_on_week, based_on_week_day)` for company leaves -- with the "before"
+spanning the source and the destination together. Distinct keys rather than a
+sum, because the copy legitimately skips a source row whose key already exists
+in the destination, and summing would report that correct de-duplication as
+data loss. Verified both ways against the customer reconstruction: the silent
+drop reports 3 lost, a correct copy reports 0.
+
+### Fixed: pre-flight crashed on a database without the recruitment app
+
+The duplicate-company and orphaned-user checks queried their tables
+unconditionally, so `preflight` raised `UndefinedTable` -- aborting the whole
+migration -- on any v1 where the recruitment app was not installed. A check that
+cannot run is now skipped rather than fatal. Found while writing tests for the
+above.
+
+
 ## 1.1.1
 
 ### Fixed: the holiday copy silently dropped rows when the target already had data
@@ -43,8 +90,7 @@ Horilla's own demo data contains 111 colliding `(employee, date)` pairs across
 225 work records, so any v1 install that loaded the sample data hits it -- and
 hits it part-way through stage 5, with a half-changed schema and a restore.
 
-Pre-flight now checks every uniqueness rule v2 introduces -- 13
-`unique_together` plus the `UniqueConstraint` set -- against the source database
+Pre-flight now checks the uniqueness rules v2 introduces against the source database
 before the backup is taken, and names the table, the columns and the number of
 duplicates. Columns are resolved by asking the database whether the model field
 is `field` or `field_id`, because Django's `_id` suffixing is not derivable from
