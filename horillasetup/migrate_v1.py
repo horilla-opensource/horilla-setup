@@ -392,8 +392,15 @@ with connection.cursor() as c:
     print("::hashes", scalar(
         "select coalesce(md5(string_agg(username||password, ',' order by username)), '') "
         "from horilla_auth_horillauser"))
-    print("::holidays", scalar("select count(*) from base_holidays"))
-    print("::company_leaves", scalar("select count(*) from base_companyleaves"))
+    # Distinct natural keys, to match how snapshot() counted them. Comparing a
+    # distinct-key count before against a row count after would report a
+    # legitimately de-duplicated row as a loss.
+    print("::holidays", scalar(
+        "select count(*) from (select distinct name, start_date "
+        "from base_holidays) d"))
+    print("::company_leaves", scalar(
+        "select count(*) from (select distinct based_on_week, based_on_week_day "
+        "from base_companyleaves) d"))
 """)
     if result.returncode != 0:
         raise MigrationError(f"verification could not run:\n{result.stderr[-1500:]}")
@@ -446,10 +453,43 @@ with connection.cursor() as c:
     print("::hashes", scalar(
         "select coalesce(md5(string_agg(username||password, ',' order by username)), '') "
         "from auth_user"))
-    # v2 destroys these unless they are carried across; counted here so
-    # stage 6 can prove they were.
-    print("::holidays", scalar("select count(*) from leave_holiday"))
-    print("::company_leaves", scalar("select count(*) from leave_companyleave"))
+
+    def table_exists(name):
+        c.execute(
+            "select 1 from information_schema.tables "
+            "where table_schema = current_schema() and table_name = %s",
+            [name],
+        )
+        return c.fetchone() is not None
+
+    # v2 destroys these unless they are carried across; counted here so stage 6
+    # can prove they were.
+    #
+    # Counted as DISTINCT NATURAL KEYS across the source and the destination
+    # together, not as rows in the source alone. Some v1 versions already store
+    # holidays in `base`, so the destination arrives holding its own rows; a
+    # plain source-count compared against a destination-count then reads
+    # 3 - 11 = -8 and reports success while three holidays are silently lost.
+    # That is exactly what happened, and this check was written to catch it.
+    #
+    # Distinct keys rather than a sum, because the copy legitimately skips a
+    # source row whose natural key already exists in the destination. Summing
+    # would report that correct de-duplication as data loss.
+    holiday_sources = ["select name, start_date from leave_holiday"]
+    if table_exists("base_holidays"):
+        holiday_sources.append("select name, start_date from base_holidays")
+    print("::holidays", scalar(
+        "select count(*) from (select distinct * from ("
+        + " union all ".join(holiday_sources) + ") u) d"))
+
+    leave_sources = [
+        "select based_on_week, based_on_week_day from leave_companyleave"]
+    if table_exists("base_companyleaves"):
+        leave_sources.append(
+            "select based_on_week, based_on_week_day from base_companyleaves")
+    print("::company_leaves", scalar(
+        "select count(*) from (select distinct * from ("
+        + " union all ".join(leave_sources) + ") u) d"))
 """)
     if result.returncode != 0:
         raise MigrationError(f"could not read the database:\n{result.stderr[-1500:]}")
